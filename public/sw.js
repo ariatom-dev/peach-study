@@ -1,4 +1,5 @@
-const CACHE_NAME = 'peach-study-shell-v1';
+const CACHE_NAME = 'peach-study-shell-v2';
+const FONT_CACHE = 'peach-study-fonts-v1';
 const APP_SHELL = ['/'];
 
 self.addEventListener('install', (event) => {
@@ -8,7 +9,9 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))))
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((key) => key !== CACHE_NAME && key !== FONT_CACHE).map((key) => caches.delete(key)))
+    )
   );
   self.clients.claim();
 });
@@ -16,6 +19,22 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
+
+  // Google Fonts: serve from cache when offline so the typography survives.
+  if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
+    event.respondWith(
+      caches.open(FONT_CACHE).then(async (cache) => {
+        const cached = await cache.match(event.request);
+        const network = fetch(event.request).then((response) => {
+          if (response && (response.ok || response.type === 'opaque')) cache.put(event.request, response.clone());
+          return response;
+        }).catch(() => cached);
+        return cached || network;
+      })
+    );
+    return;
+  }
+
   if (url.origin !== self.location.origin) return;
   event.respondWith(
     fetch(event.request).then((response) => {
