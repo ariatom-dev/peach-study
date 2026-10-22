@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase, supabaseConfigured } from './supabase.js';
+import { normalizeDeck } from './data.js';
 
 export function friendlyError(error) {
   const message = error?.message || 'Something went wrong. Please try again.';
@@ -72,7 +73,7 @@ export function useCloud({ decks, setDecks, readLocal, notify }) {
         setLoaded(true);
         return;
       }
-      const cloudDecks = (data || []).map((row) => ({
+      const cloudDecks = (data || []).map((row) => normalizeDeck({
         id: String(row.id),
         title: row.title,
         cards: Array.isArray(row.cards) ? row.cards : [],

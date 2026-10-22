@@ -4,6 +4,8 @@ import { useTheme } from './theme.js';
 import { useRoute } from './route.js';
 import { useCloud } from './cloud.js';
 import { parseTerms } from './parse.js';
+import { newId, normalizeDecks } from './data.js';
+import Study from './Study.jsx';
 
 const LOCAL_KEY = 'peach-study-deck';
 const EXAMPLE = `Cell membrane: Controls what enters and leaves the cell.
@@ -14,13 +16,11 @@ Active transport: Movement of substances across a membrane using energy.`;
 function readLocalDecks() {
   try {
     const saved = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]');
-    return Array.isArray(saved) ? saved.map((set) => ({ ...set, id: String(set.id) })) : [];
+    return normalizeDecks(saved);
   } catch {
     return [];
   }
 }
-
-const newId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
 export default function App() {
   const theme = useTheme();
@@ -42,7 +42,12 @@ export default function App() {
   const cloud = useCloud({ decks, setDecks, readLocal: readLocalDecks, notify });
 
   const createDeck = (title, cards) => {
-    const deck = { id: newId(), title: title.trim() || 'Untitled study set', cards, createdAt: new Date().toISOString() };
+    const deck = {
+      id: newId(),
+      title: title.trim() || 'Untitled study set',
+      cards: cards.map((c) => ({ ...c, id: newId() })),
+      createdAt: new Date().toISOString(),
+    };
     setDecks((prev) => [deck, ...prev]);
     notify(`Created “${deck.title}” with ${cards.length} terms.`);
     go('/');
@@ -56,6 +61,13 @@ export default function App() {
     notify('Study set deleted.');
     go('/');
   };
+
+  const updateCard = useCallback((deckId, cardId, patch) => {
+    setDecks((prev) => prev.map((d) => (d.id !== deckId ? d : {
+      ...d,
+      cards: d.cards.map((c) => (c.id === cardId ? { ...c, ...patch } : c)),
+    })));
+  }, []);
 
   const exportData = () => {
     const blob = new Blob([JSON.stringify(decks, null, 2)], { type: 'application/json' });
@@ -80,7 +92,7 @@ export default function App() {
         {route.name === 'create' && <Create onCreate={createDeck} go={go} />}
         {route.name === 'settings' && <Settings theme={theme} cloud={cloud} onExport={exportData} />}
         {route.name === 'study' && (activeDeck
-          ? <FlipStudy deck={activeDeck} go={go} />
+          ? <Study key={activeDeck.id} deck={activeDeck} go={go} onUpdateCard={updateCard} />
           : <div className="page"><button className="back-link" onClick={() => go('/')}><Icon name="back" size={16} /> Library</button><h1>Not found</h1><p className="lede">That study set isn’t on this device.</p></div>)}
       </main>
       {toast && <div className={`toast ${toast.tone}`} role="status">{toast.text}</div>}
@@ -294,32 +306,5 @@ function Account({ cloud }) {
         {mode === 'signup' ? 'Have an account? Sign in' : 'New here? Create an account'}
       </button>
     </form>
-  );
-}
-
-/* ───────────── Study (interim flip card; replaced by the scroll feed in Section 2) ───────────── */
-
-function FlipStudy({ deck, go }) {
-  const [index, setIndex] = useState(0);
-  const [shown, setShown] = useState(false);
-  const card = deck.cards[index];
-  const move = (d) => { setIndex((i) => Math.min(deck.cards.length - 1, Math.max(0, i + d))); setShown(false); };
-  if (!card) return null;
-  return (
-    <section className="page narrow">
-      <button className="back-link" onClick={() => go('/')}><Icon name="back" size={16} /> Library</button>
-      <p className="eyebrow">Study · {index + 1} of {deck.cards.length}</p>
-      <h1>{deck.title}</h1>
-      <div className="progress"><div style={{ width: `${((index + 1) / deck.cards.length) * 100}%` }} /></div>
-      <button className={`flip-card ${shown ? 'shown' : ''}`} onClick={() => setShown((s) => !s)}>
-        <span className="flip-kicker">{shown ? 'Definition' : 'Term'}</span>
-        <span className="flip-main">{shown ? card.definition : card.term}</span>
-        <span className="flip-hint">{shown ? 'Tap to see the term' : 'Tap to reveal'}</span>
-      </button>
-      <div className="study-controls">
-        <button className="btn" disabled={index === 0} onClick={() => move(-1)}>Previous</button>
-        <button className="btn primary" disabled={index === deck.cards.length - 1} onClick={() => move(1)}>Next</button>
-      </div>
-    </section>
   );
 }
