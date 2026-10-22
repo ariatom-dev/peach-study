@@ -141,3 +141,39 @@ textarea { min-height: 220px; resize: vertical; font-family: ui-monospace, SFMon
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Cloud sign-in and setup screens */
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--cream, #f6f1e7);
+}
+.auth-card {
+  width: min(100%, 460px);
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: clamp(24px, 5vw, 42px);
+  border: 1px solid var(--line, #d9d7c8);
+  border-radius: 26px;
+  background: var(--paper, #fffdf7);
+  box-shadow: 0 16px 50px rgba(64, 71, 51, .08);
+}
+.auth-card .brand-mark { margin-bottom: 5px; }
+.auth-card h1 { margin: 0; line-height: 1.08; }
+.auth-subtitle, .setup-card > p:not(.eyebrow) { line-height: 1.6; }
+.auth-card .field-label { margin-top: 6px; }
+.auth-card .title-input { width: 100%; box-sizing: border-box; }
+.auth-switch { align-self: center; text-align: center; }
+.setup-note { padding: 12px 14px; border-radius: 12px; background: rgba(148, 160, 119, .13); }
+.error-message { border-color: #c77965; }
+.account-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.account-email { font-size: .86rem; color: var(--muted, #686b5d); overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .account-actions { gap: 7px; }
+  .account-email { max-width: 150px; }
+  .auth-screen { padding: 14px; }
+  .auth-card { border-radius: 20px; }
+}

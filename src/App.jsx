@@ -1,58 +1,238 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { supabase, supabaseConfigured } from './supabase.js';
 
 const EXAMPLE = `Cell membrane: Controls what enters and leaves the cell.
 Diffusion: The net movement of particles from an area of higher concentration to lower concentration.
 Osmosis: The movement of water across a selectively permeable membrane.
 Active transport: Movement of substances across a membrane using energy.`;
+const LOCAL_KEY = 'peach-study-deck';
 
 function parseTerms(text) {
-  return text
-    .split(/\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      // Accepted formats: "Term: definition", "Term — definition", or "Term | definition"
-      const match = line.match(/^(.+?)\s*(?::|—|\|)\s*(.+)$/);
-      if (!match) return null;
-      return { term: match[1].trim(), definition: match[2].trim() };
-    })
-    .filter((item) => item && item.term && item.definition);
+  return text.split(/\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
+    const match = line.match(/^(.+?)\s*(?::|—|\|)\s*(.+)$/);
+    if (!match) return null;
+    return { term: match[1].trim(), definition: match[2].trim() };
+  }).filter((item) => item && item.term && item.definition);
+}
+
+function readLocalDecks() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LOCAL_KEY) || '[]');
+    return Array.isArray(saved) ? saved.map((set) => ({ ...set, id: String(set.id) })) : [];
+  } catch {
+    return [];
+  }
+}
+
+function friendlyError(error) {
+  const message = error?.message || 'Something went wrong. Please try again.';
+  if (/Invalid login credentials/i.test(message)) return 'That email and password combination was not recognized.';
+  if (/User already registered/i.test(message)) return 'An account with this email already exists. Try signing in instead.';
+  if (/Email not confirmed/i.test(message)) return 'Please confirm your email using the link Supabase sent you, then sign in.';
+  return message;
 }
 
 export default function App() {
   const [input, setInput] = useState(EXAMPLE);
   const [title, setTitle] = useState('Cell Biology');
-  const [deck, setDeck] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('peach-study-deck') || '[]'); }
-    catch { return []; }
-  });
+  const [deck, setDeck] = useState(readLocalDecks);
   const [activeView, setActiveView] = useState('library');
   const [activeIndex, setActiveIndex] = useState(0);
   const [showDefinition, setShowDefinition] = useState(false);
   const [message, setMessage] = useState('');
-
-  useEffect(() => {
-    localStorage.setItem('peach-study-deck', JSON.stringify(deck));
-  }, [deck]);
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(!supabaseConfigured);
+  const [authMode, setAuthMode] = useState('signup');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [authNotice, setAuthNotice] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [decksLoaded, setDecksLoaded] = useState(false);
+  const migrationStarted = useRef(false);
 
   const parsed = useMemo(() => parseTerms(input), [input]);
 
-  function createStudySet() {
+  useEffect(() => {
+    localStorage.setItem(LOCAL_KEY, JSON.stringify(deck));
+  }, [deck]);
+
+  useEffect(() => {
+    if (!supabase) return;
+    let alive = true;
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!alive) return;
+      if (error) setAuthError(friendlyError(error));
+      setSession(data?.session || null);
+      setAuthReady(true);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!alive) return;
+      setSession(nextSession);
+      setDecksLoaded(false);
+      migrationStarted.current = false;
+    });
+    return () => {
+      alive = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || !session?.user?.id) {
+      setDecksLoaded(!supabaseConfigured || !session);
+      return;
+    }
+    let alive = true;
+    async function loadCloudDecks() {
+      setCloudBusy(true);
+      setMessage('');
+      const { data, error } = await supabase
+        .from('study_decks')
+        .select('id,title,cards,created_at,updated_at')
+        .order('created_at', { ascending: false });
+      if (!alive) return;
+      if (error) {
+        setMessage(`Cloud sync couldn't load your decks: ${friendlyError(error)} Check that you ran the SQL setup file.`);
+        setCloudBusy(false);
+        setDecksLoaded(true);
+        return;
+      }
+
+      const localDecks = readLocalDecks();
+      const cloudDecks = (data || []).map((row) => ({
+        id: String(row.id),
+        title: row.title,
+        cards: Array.isArray(row.cards) ? row.cards : [],
+        createdAt: row.created_at || new Date().toISOString(),
+      }));
+      const cloudIds = new Set(cloudDecks.map((set) => String(set.id)));
+      const localOnly = localDecks.filter((set) => !cloudIds.has(String(set.id)));
+
+      // Merge local-only decks into the signed-in user's cloud library once.
+      if (localOnly.length && !migrationStarted.current) {
+        migrationStarted.current = true;
+        const payload = localOnly.map((set) => ({
+          user_id: session.user.id,
+          id: String(set.id),
+          title: set.title || 'Untitled study set',
+          cards: Array.isArray(set.cards) ? set.cards : [],
+          created_at: set.createdAt || new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }));
+        const { error: migrateError } = await supabase.from('study_decks').upsert(payload, { onConflict: 'user_id,id' });
+        if (!alive) return;
+        if (migrateError) {
+          setMessage(`Your cloud decks loaded, but local decks could not be copied up: ${friendlyError(migrateError)}`);
+        } else {
+          cloudDecks.push(...localOnly);
+          cloudDecks.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+          setMessage(`Synced ${localOnly.length} existing deck${localOnly.length === 1 ? '' : 's'} from this device to your account.`);
+        }
+      }
+      setDeck(cloudDecks);
+      setDecksLoaded(true);
+      setCloudBusy(false);
+    }
+    loadCloudDecks();
+    return () => { alive = false; };
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (!supabase || !session?.user?.id || !decksLoaded) return;
+    let alive = true;
+    async function syncDecks() {
+      const payload = deck.map((set) => ({
+        user_id: session.user.id,
+        id: String(set.id),
+        title: set.title || 'Untitled study set',
+        cards: Array.isArray(set.cards) ? set.cards : [],
+        created_at: set.createdAt || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }));
+      // The app writes individual decks on create and delete; this effect keeps edits/backups in sync.
+      if (!payload.length) return;
+      const { error } = await supabase.from('study_decks').upsert(payload, { onConflict: 'user_id,id' });
+      if (alive && error) setMessage(`Cloud save failed: ${friendlyError(error)}`);
+    }
+    syncDecks();
+    return () => { alive = false; };
+  }, [deck, session?.user?.id, decksLoaded]);
+
+  async function handleAuthSubmit(event) {
+    event.preventDefault();
+    if (!supabase) return;
+    setAuthBusy(true);
+    setAuthError('');
+    setAuthNotice('');
+    try {
+      if (authMode === 'signup') {
+        const { data, error } = await supabase.auth.signUp({
+          email: authEmail.trim(),
+          password: authPassword,
+          options: { emailRedirectTo: window.location.origin },
+        });
+        if (error) throw error;
+        if (data.session) {
+          setAuthNotice('Your account is ready. Your decks will now sync to this account.');
+        } else {
+          setAuthNotice('Account created! Check your email for a confirmation link, then come back and sign in.');
+          setAuthMode('login');
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: authEmail.trim(),
+          password: authPassword,
+        });
+        if (error) throw error;
+        setAuthNotice('Signed in. Loading your synced decks…');
+      }
+    } catch (error) {
+      setAuthError(friendlyError(error));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function signOut() {
+    if (!supabase) return;
+    const { error } = await supabase.auth.signOut();
+    if (error) setMessage(friendlyError(error));
+    else {
+      setDeck(readLocalDecks());
+      setDecksLoaded(false);
+      setMessage('Signed out. The decks already saved on this device remain here.');
+    }
+  }
+
+  async function createStudySet() {
     if (!parsed.length) {
       setMessage('I couldn’t find any terms. Use “Term: definition”, one per line.');
       return;
     }
-    const set = {
-      id: Date.now(),
+    const newSet = {
+      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
       title: title.trim() || 'Untitled study set',
       cards: parsed,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     };
-    setDeck((previous) => [set, ...previous]);
+    setDeck((previous) => [newSet, ...previous]);
     setActiveIndex(0);
     setShowDefinition(false);
     setActiveView('library');
-    setMessage(`Created “${set.title}” with ${parsed.length} terms.`);
+    setMessage(`Created “${newSet.title}” with ${parsed.length} terms.`);
+    if (supabase && session?.user?.id) {
+      const { error } = await supabase.from('study_decks').upsert({
+        user_id: session.user.id,
+        id: String(newSet.id),
+        title: newSet.title,
+        cards: newSet.cards,
+        created_at: newSet.createdAt,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,id' });
+      if (error) setMessage(`Saved on this device, but cloud save failed: ${friendlyError(error)}`);
+    }
   }
 
   function openSet(set) {
@@ -62,8 +242,8 @@ export default function App() {
     setMessage('');
   }
 
-  const activeSetId = activeView.startsWith('study:') ? Number(activeView.split(':')[1]) : null;
-  const activeSet = deck.find((set) => set.id === activeSetId);
+  const activeSetId = activeView.startsWith('study:') ? activeView.slice('study:'.length) : null;
+  const activeSet = deck.find((set) => String(set.id) === activeSetId);
   const activeCard = activeSet?.cards[activeIndex];
 
   function moveCard(direction) {
@@ -72,10 +252,14 @@ export default function App() {
     setShowDefinition(false);
   }
 
-  function removeSet(id) {
-    setDeck((previous) => previous.filter((set) => set.id !== id));
+  async function removeSet(id) {
+    setDeck((previous) => previous.filter((set) => String(set.id) !== String(id)));
     setActiveView('library');
     setMessage('Study set deleted.');
+    if (supabase && session?.user?.id) {
+      const { error } = await supabase.from('study_decks').delete().eq('user_id', session.user.id).eq('id', String(id));
+      if (error) setMessage(`Removed on this device, but cloud delete failed: ${friendlyError(error)}`);
+    }
   }
 
   function exportData() {
@@ -87,6 +271,47 @@ export default function App() {
     link.click();
     URL.revokeObjectURL(url);
     setMessage('Backup downloaded.');
+  }
+
+  if (!authReady) {
+    return <div className="auth-screen"><div className="auth-card"><div className="brand-mark">p.</div><h1>Opening your study space…</h1></div></div>;
+  }
+
+  if (!supabaseConfigured) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card setup-card">
+          <div className="brand-mark">p.</div>
+          <p className="eyebrow sage">ONE-TIME SETUP</p>
+          <h1>Let’s connect your cloud.</h1>
+          <p>Cloud sync is not configured yet. Add your separate Peach Study Supabase project URL and publishable key to a <code>.env.local</code> file, then restart the app and redeploy.</p>
+          <p className="setup-note">Your existing app is still safe. This screen means the cloud connection settings haven't been added yet.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="auth-screen">
+        <form className="auth-card" onSubmit={handleAuthSubmit}>
+          <div className="brand-mark">p.</div>
+          <p className="eyebrow sage">YOUR LITTLE LEARNING SPACE</p>
+          <h1>{authMode === 'signup' ? 'Create your account.' : 'Welcome back.'}</h1>
+          <p className="auth-subtitle">Sign in to keep your study decks synced between devices.</p>
+          <label className="field-label" htmlFor="auth-email">Email address</label>
+          <input id="auth-email" className="title-input" type="email" autoComplete="email" required value={authEmail} onChange={(event) => setAuthEmail(event.target.value)} />
+          <label className="field-label" htmlFor="auth-password">Password</label>
+          <input id="auth-password" className="title-input" type="password" autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'} minLength={6} required value={authPassword} onChange={(event) => setAuthPassword(event.target.value)} />
+          {authError && <div className="message error-message" role="alert">{authError}</div>}
+          {authNotice && <div className="message" role="status">{authNotice}</div>}
+          <button className="primary-button create-submit" disabled={authBusy} type="submit">{authBusy ? 'Please wait…' : authMode === 'signup' ? 'Create account' : 'Sign in'}</button>
+          <button className="text-button auth-switch" type="button" onClick={() => { setAuthMode(authMode === 'signup' ? 'login' : 'signup'); setAuthError(''); setAuthNotice(''); }}>
+            {authMode === 'signup' ? 'Already have an account? Sign in' : 'New to Peach Study? Create an account'}
+          </button>
+        </form>
+      </div>
+    );
   }
 
   return (
@@ -113,7 +338,11 @@ export default function App() {
       <main className="main-content">
         <header className="topbar">
           <span className="eyebrow">YOUR PERSONAL STUDY SPACE</span>
-          <span className="local-pill"><span className="status-dot" /> Saved on this device</span>
+          <div className="account-actions">
+            <span className="local-pill"><span className="status-dot" /> {cloudBusy ? 'Syncing…' : 'Cloud sync on'}</span>
+            <span className="account-email">{session.user.email}</span>
+            <button className="backup-button" onClick={signOut}>Sign out</button>
+          </div>
         </header>
 
         {activeView === 'library' && (
@@ -132,6 +361,7 @@ export default function App() {
               <button className="primary-button" onClick={() => { setActiveView('create'); setMessage(''); }}>＋ Create a study set</button>
             </div>
             {message && <div className="message" role="status">{message}</div>}
+            {cloudBusy && <div className="message" role="status">Checking your cloud library…</div>}
             {deck.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-illustration"><span>✳</span><span>✧</span><div>✎</div></div>
