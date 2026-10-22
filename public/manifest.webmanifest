@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "Peach Study",
+  "short_name": "Peach Study",
+  "description": "A calm, personal space to study your own notes.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f8f7f1",
+  "theme_color": "#f4f0e5",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
